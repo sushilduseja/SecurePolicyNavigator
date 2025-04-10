@@ -1,0 +1,8 @@
+langchain==0.1.12
+langchain-community==0.0.27
+sentence-transformers==2.5.1
+chromadb==0.4.24
+streamlit==1.32.2
+python-dotenv==1.0.1
+pydantic==2.6.4
+tiktoken==0.6.0 
