@@ -1,1 +1,1 @@
-ÿþ
+"""Utility functions and classes."""

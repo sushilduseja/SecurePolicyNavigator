@@ -1,1 +1,1 @@
-ÿþ
+"""RAG pipeline module."""

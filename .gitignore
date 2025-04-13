@@ -41,3 +41,7 @@ data/*
 # Environment variables
 .env
 .env.local 
+
+# Temporary files
+temp/
+tmp/

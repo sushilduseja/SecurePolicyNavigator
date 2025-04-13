@@ -1,1 +1,1 @@
-ÿþ
+"""UI components module."""

@@ -31,17 +31,23 @@ secure-policy-navigator/
 2. Create and activate virtual environment:
    ```bash
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   # On Windows:
+   venv\Scripts\activate
+   # On Linux/Mac:
+   source venv/bin/activate
    ```
 3. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 4. Install and start Ollama (follow instructions at https://ollama.ai)
-5. Run the application:
-   ```bash
-   streamlit run src/app.py
-   ```
+
+## Running the Application
+
+Run the application using:
+```bash
+streamlit run src/app.py
+```
 
 ## Development
 
@@ -52,4 +58,4 @@ secure-policy-navigator/
 
 ## License
 
-MIT License 
+MIT License
