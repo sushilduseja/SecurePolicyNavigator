@@ -6,7 +6,7 @@ from pathlib import Path
 import logging
 import asyncio
 from typing import Any, Optional
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock
 
 # Configure logging
 logging.basicConfig(
@@ -15,28 +15,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class MockTorchClassesPath:
-    """Mock implementation of torch.classes __path__"""
-    def __init__(self):
-        self._path = [str(Path(torch.__file__).parent / "_classes"]
-
-    def __iter__(self):
-        return iter(self._path)
-
-    def __contains__(self, item):
-        return item in self._path
-
 class MockTorchClasses:
-    """Enhanced mock implementation of torch.classes"""
-    def __init__(self):
-        self.__path__ = MockTorchClassesPath()
+    """Mock implementation of torch.classes to prevent runtime errors."""
+    def __init__(self) -> None:
         self._modules = {}
+        self.__path__ = []  # Mock __path__ as an empty list
 
     def __getattr__(self, name: str) -> Any:
         if name not in self._modules:
-            mock_module = MagicMock()
-            mock_module.__path__ = MockTorchClassesPath()
-            self._modules[name] = mock_module
+            self._modules[name] = MagicMock()
         return self._modules[name]
 
 def patch_torch() -> None:
@@ -44,15 +31,13 @@ def patch_torch() -> None:
     try:
         import torch
         
+        # Mock torch.classes with a valid __path__ attribute
         if not hasattr(torch, "classes"):
             torch.classes = MockTorchClasses()
         
-        # Add proper __path__ attribute
-        torch.classes.__path__ = MockTorchClassesPath()
-        
         # Patch custom class wrapper
         if not hasattr(torch._C, "_get_custom_class_python_wrapper"):
-            torch._C._get_custom_class_python_wrapper = lambda *args, **kwargs: None
+            setattr(torch._C, "_get_custom_class_python_wrapper", lambda *args, **kwargs: None)
         
         logger.info("Torch environment patched successfully")
     except ImportError:
