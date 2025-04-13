@@ -1,178 +1,172 @@
 import os
-from pathlib import Path
-from typing import List, Dict, Any, Optional
 import re
-from langchain_community.document_loaders import TextLoader, DirectoryLoader
-from langchain.text_splitter import CharacterTextSplitter, MarkdownHeaderTextSplitter
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+import logging
+
+# Use Unstructured loaders for better handling of complex markdown and other formats
+# Ensure 'unstructured' and potentially related libraries (like 'markdown', 'libmagic') are installed
+try:
+    from langchain_community.document_loaders import (
+        DirectoryLoader,
+        UnstructuredMarkdownLoader,
+        TextLoader,
+    )
+    HAS_UNSTRUCTURED = True
+except ImportError:
+    HAS_UNSTRUCTURED = False
+    from langchain_community.document_loaders import DirectoryLoader, TextLoader
+    logging.warning("Unstructured library not found. Markdown parsing will be basic.")
+    logging.warning("Install 'unstructured' (and potentially 'unstructured[md]') for better markdown support.")
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
+
 from src.utils.config import DATA_DIR, CHUNK_SIZE, CHUNK_OVERLAP
-from src.utils.error_handler import DocumentLoadError  # Import DocumentLoadError
+from src.utils.error_handler import DocumentLoadError
 
-class SimpleMarkdownLoader:
-    """A simple markdown loader that reads files as plain text with basic markdown handling."""
-    
-    def __init__(self, file_path):
-        self.file_path = file_path
-    
-    def _clean_markdown(self, text: str) -> str:
-        """Remove markdown formatting while preserving content structure."""
-        # Remove headers while preserving content
-        text = re.sub(r'#{1,6}\s+(.+)', r'\1', text)
-        
-        # Remove emphasis markers
-        text = re.sub(r'[*_]{1,2}([^*_]+)[*_]{1,2}', r'\1', text)
-        
-        # Remove code blocks while preserving content
-        text = re.sub(r'```[^\n]*\n(.*?)\n```', r'\1', text, flags=re.DOTALL)
-        
-        # Remove inline code
-        text = re.sub(r'`([^`]+)`', r'\1', text)
-        
-        # Convert lists to plain text
-        text = re.sub(r'^\s*[-*+]\s+', '• ', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*\d+\.\s+', '• ', text, flags=re.MULTILINE)
-        
-        # Preserve line breaks for readability
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        
-        return text.strip()
-    
-    def load(self) -> List[Document]:
-        """Load and process markdown file."""
+logger = logging.getLogger(__name__)
+
+def _create_loader(file_path: Path) -> Any:
+    """Creates the appropriate document loader based on file extension."""
+    ext = file_path.suffix.lower()
+    if ext == ".md" and HAS_UNSTRUCTURED:
+        # Unstructured handles complex markdown better
+        return UnstructuredMarkdownLoader(str(file_path), mode="elements")
+    elif ext in [".txt", ".md"]: # Fallback for .md if unstructured is not available
+        # Use TextLoader for plain text and basic markdown fallback
         try:
-            with open(self.file_path, 'r', encoding='utf-8') as f:
-                text = f.read()
-                
-            # Clean markdown formatting
-            cleaned_text = self._clean_markdown(text)
-            
-            # Create metadata
-            metadata = {
-                "source": str(self.file_path),
-                "file_type": "markdown",
-                "filename": Path(self.file_path).name
-            }
-            
-            return [Document(page_content=cleaned_text, metadata=metadata)]
-            
+            return TextLoader(str(file_path), encoding="utf-8")
         except Exception as e:
-            print(f"Error loading markdown file {self.file_path}: {str(e)}")
-            return []
-
-def clean_text(text: str) -> str:
-    """Clean and normalize text content."""
-    # Remove extra whitespace
-    text = re.sub(r'\s+', ' ', text)
-    # Remove special characters but keep basic punctuation
-    text = re.sub(r'[^\w\s.,!?;:-]', '', text)
-    return text.strip()
-
-def process_document(doc: Document) -> Document:
-    """Process a single document by cleaning text and adding metadata."""
-    # Clean the text content while preserving important characters
-    cleaned_text = doc.page_content.strip()
-    cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
-    
-    # Ensure metadata contains required fields
-    metadata = doc.metadata.copy()
-    if "source" in metadata:
-        metadata["source"] = str(metadata["source"])
-    
-    # Add computed metadata
-    metadata["word_count"] = len(cleaned_text.split())
-    metadata["char_count"] = len(cleaned_text)
-    
-    return Document(page_content=cleaned_text, metadata=metadata)
-
-def process_documents(documents: List[Document]) -> List[Document]:
-    """Process a list of documents by cleaning text and adding metadata."""
-    return [process_document(doc) for doc in documents]
-
-def load_documents(data_dir: Optional[str] = None) -> List[Document]:
-    """Load and process documents from directory."""
-    if data_dir is None:
-        data_dir = str(DATA_DIR)
-    
-    if not os.path.exists(data_dir):
-        raise DocumentLoadError("Directory does not exist")
-        
-    print(f"Loading documents from {data_dir}")
-    documents = []
-    data_path = Path(data_dir)
-    
-    # Load supported file types
-    supported_extensions = ["*.md", "*.txt"]  # Support both markdown and text files
-    supported_files = []
-    for ext in supported_extensions:
-        supported_files.extend(list(data_path.glob(f"**/{ext}")))
-    
-    if not supported_files:
-        # Check if there are any files at all (including unsupported types)
-        all_files = list(data_path.glob("**/*.*"))
-        if all_files:
-            print(f"Found {len(all_files)} files, but none with supported extensions ({', '.join(supported_extensions)})")
-            # Just return empty list rather than raising an error
-            return []
-        else:
-            raise DocumentLoadError("No documents found")
-    
-    for file_path in supported_files:
-        try:
-            if file_path.suffix == '.md':
-                loader = SimpleMarkdownLoader(str(file_path))
-                file_type = "markdown"  # Changed from 'md' to 'markdown'
-            else:  # .txt files
-                loader = TextLoader(str(file_path), encoding='utf-8')
-                file_type = "text"
-                
-            docs = loader.load()
-            
-            # Normalize paths and metadata
-            for doc in docs:
-                doc.metadata.update({
-                    "source": str(file_path.resolve()),
-                    "file_type": file_type,
-                    "filename": file_path.name
-                })
-            documents.extend(docs)
-        except Exception as e:
-            print(f"Error loading {file_path}: {str(e)}")
-    
-    processed_docs = process_documents(documents)
-    print(f"Loaded {len(processed_docs)} documents")
-    return processed_docs
-
-def get_document_list(
-    data_dir: Optional[str] = None,
-    file_types: Optional[List[str]] = None
-) -> List[str]:
-    """
-    Get a list of available document names in the specified directory.
-    
-    Args:
-        data_dir: The directory to search in. Defaults to DATA_DIR from config.
-        file_types: List of file extensions to include (without dots).
-                   If None, includes all supported file types.
-    
-    Returns:
-        List of document filenames
-    """
-    if data_dir is None:
-        data_dir_path = DATA_DIR
+            logger.warning(f"Failed to load {file_path} with utf-8 encoding, trying fallback: {e}")
+            # Try a fallback encoding if utf-8 fails
+            try:
+                return TextLoader(str(file_path), encoding="latin-1")
+            except Exception as e_fallback:
+                logger.error(f"Failed to load {file_path} with fallback encoding: {e_fallback}")
+                raise DocumentLoadError(f"Could not load file {file_path.name} due to encoding issues.") from e_fallback
     else:
-        data_dir_path = Path(data_dir)
+        # Potentially add loaders for other types (PDF, DOCX) using unstructured here
+        logger.warning(f"Unsupported file type: {ext} for file {file_path.name}. Skipping.")
+        return None
 
-    if not data_dir_path.is_dir():
+
+def load_and_split_documents(data_dir: Optional[str] = None) -> List[Document]:
+    """
+    Loads documents from the specified directory, splits them into chunks,
+    and returns a list of Document objects (chunks).
+    """
+    target_dir = Path(data_dir) if data_dir else DATA_DIR
+    if not target_dir.is_dir():
+        logger.error(f"Data directory not found: {target_dir}")
+        raise DocumentLoadError(f"Directory does not exist: {target_dir}")
+
+    logger.info(f"Loading documents from: {target_dir}")
+    loaded_documents = []
+    processed_files = 0
+    skipped_files = 0
+
+    supported_extensions = ["*.md", "*.txt"]
+    all_files = []
+    for ext_pattern in supported_extensions:
+        all_files.extend(list(target_dir.rglob(ext_pattern)))
+
+    if not all_files:
+        logger.warning(f"No documents with supported extensions ({', '.join(supported_extensions)}) found in {target_dir}")
         return []
 
-    if file_types is None:
-        file_types = ['md', 'txt']  # Default supported types
-    
-    # Convert file types to proper glob patterns
-    patterns = [f"**/*.{ext}" for ext in file_types]
-    
-    documents = []
+    logger.info(f"Found {len(all_files)} potential documents.")
+
+    for file_path in all_files:
+        if file_path.is_file():
+            # ****** ADDED LOGGING ******
+            logger.debug(f"Processing file: {file_path.name}")
+            # **************************
+            try:
+                loader = _create_loader(file_path)
+                if loader:
+                    # ****** ADDED LOGGING ******
+                    logger.info(f"Loading '{file_path.name}' using {type(loader).__name__}")
+                    # **************************
+                    docs = loader.load()
+                    for doc in docs:
+                        doc.metadata["source"] = str(file_path.resolve())
+                        doc.metadata["filename"] = file_path.name
+                    loaded_documents.extend(docs)
+                    processed_files += 1
+                else:
+                    skipped_files += 1
+            except DocumentLoadError as dle:
+                logger.error(f"Skipping file due to load error: {dle}")
+                skipped_files += 1
+            except Exception as e:
+                logger.error(f"Unexpected error loading file {file_path}: {e}", exc_info=DEBUG)
+                skipped_files += 1
+        else:
+            logger.warning(f"Skipping non-file item: {file_path}")
+            skipped_files += 1
+
+    if not loaded_documents:
+        logger.warning("No documents were successfully loaded.")
+        return []
+
+    logger.info(f"Successfully loaded content from {processed_files} files. Skipped {skipped_files} files.")
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        length_function=len,
+        add_start_index=True,
+    )
+
+    logger.info(f"Splitting {len(loaded_documents)} loaded document sections into chunks...")
+    chunks = text_splitter.split_documents(loaded_documents)
+    logger.info(f"Created {len(chunks)} document chunks.")
+
+    # ****** ADDED LOGGING ******
+    # Log chunk counts per file for debugging retrieval issues
+    source_chunk_counts = {}
+    for chunk in chunks:
+        source = chunk.metadata.get("filename", "Unknown")
+        source_chunk_counts[source] = source_chunk_counts.get(source, 0) + 1
+    logger.debug(f"Chunk counts per source file: {source_chunk_counts}")
+    # **************************
+
+
+    final_chunks = []
+    for i, chunk in enumerate(chunks):
+        chunk.page_content = re.sub(r"\s+", " ", chunk.page_content).strip()
+        chunk.metadata["chunk_id"] = i
+        if chunk.page_content:
+            final_chunks.append(chunk)
+
+    logger.info(f"Returning {len(final_chunks)} non-empty document chunks.")
+    return final_chunks
+
+def get_document_list(data_dir: Optional[str] = None) -> List[str]:
+    """
+    Get a list of unique source document filenames available in the data directory.
+    """
+    target_dir = Path(data_dir) if data_dir else DATA_DIR
+    if not target_dir.is_dir():
+        logger.warning(f"Cannot list documents, directory not found: {target_dir}")
+        return []
+
+    supported_extensions = ['md', 'txt'] # Add more if loaders are added
+    patterns = [f"**/*.{ext}" for ext in supported_extensions]
+
+    documents = set()
     for pattern in patterns:
-        documents.extend([f.name for f in data_dir_path.glob(pattern)])
-    
-    return sorted(list(set(documents)))
+        for f in target_dir.rglob(pattern):
+            if f.is_file():
+                # Store the relative path from the data directory for consistency
+                try:
+                    relative_path = f.relative_to(target_dir)
+                    documents.add(str(relative_path))
+                except ValueError:
+                    # If the file is not within the target_dir somehow, use absolute path
+                    documents.add(str(f.resolve()))
+
+
+    logger.info(f"Found {len(documents)} unique source documents in {target_dir}")
+    return sorted(list(documents))

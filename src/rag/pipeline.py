@@ -1,326 +1,227 @@
-from typing import List, Dict, Any, Optional
-from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from src.utils.config import LLM_MODEL, DEBUG, LLM_CONFIG
-from src.utils.document_loader import load_documents
-from src.utils.vector_store import VectorStoreManager
-import torch
-import logging
-from ..utils.error_handler import handle_model_error
+"""RAG Pipeline implementation for the Policy Navigator."""
 import os
-from unittest.mock import MagicMock
+import logging
+from typing import Dict, List, Any, Optional
+from pathlib import Path
+import torch
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForCausalLM,
+    pipeline,
+    GenerationConfig
+)
+from langchain.chains import RetrievalQA
+from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
+from langchain.prompts import PromptTemplate
+
+from src.utils.config import (
+    LLM_MODEL,
+    LLM_CONFIG,
+    RAG_CHAIN_TYPE,
+    DEFAULT_K,
+    DEBUG
+)
+from src.utils.vector_store import VectorStoreManager
+from src.utils.error_handler import handle_model_error, ModelError
+
 logger = logging.getLogger(__name__)
 
-# Handle torch initialization
-if not hasattr(torch, "classes"):
-    mock = MagicMock()
-    # Add __path__ attribute to the mock
-    mock.__path__ = MagicMock()
-    mock.__path__._path = []
-    torch.classes = mock
-if not hasattr(torch._C, "_get_custom_class_python_wrapper"):
-    setattr(torch._C, "_get_custom_class_python_wrapper", lambda *args, **kwargs: None)
+# Template for improved response structuring
+RESPONSE_TEMPLATE = """Answer the question based on the provided context.
+Focus on relevant security policy and compliance information.
+If the answer cannot be derived from the context, say "I don't have enough information to answer this question."
 
-# Custom prompt template for better responses
-QA_PROMPT = PromptTemplate(
-    template="""You are a helpful AI assistant specializing in security compliance and policy interpretation.
-Use the following pieces of context to answer the question at the end.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-
-Context:
-{context}
+Context: {context}
 
 Question: {question}
 
-Answer: Let me help you with that based on the compliance documentation.""",
-    input_variables=["context", "question"]
-)
+Answer: Let me help you with that.
+"""
 
 class RAGPipeline:
+    """
+    Retrieval-Augmented Generation pipeline for policy queries.
+    """
+    
     def __init__(self):
-        """Initialize the RAG pipeline components."""
+        """Initialize RAG pipeline components."""
+        self.vector_store_manager = VectorStoreManager()
+        self.vector_store = None
+        self.llm = None
+        self.qa_chain = None
+        self.retriever = None
+        self._initialize_pipeline()
+
+    def _initialize_pipeline(self):
+        """Initialize LLM and QA chain components."""
         try:
-            # Set environment variable to avoid torch class loading issue
-            os.environ["TORCH_CLASSES"] = "0"
-            
-            if os.getenv("PYTEST_CURRENT_TEST"):
-                # Test environment initialization
-                self.tokenizer = None
-                self.model = None
-                self.llm = MagicMock()  # Use MagicMock instead of None
-                self.vector_store_manager = VectorStoreManager()
-                self.vector_store = self.vector_store_manager  # For backward compatibility
+            # Initialize vector store first
+            if not self.vector_store_manager.is_initialized:
                 self.vector_store_manager.initialize()
-                self.qa_chain = None
-                self.retriever = self.vector_store_manager.vector_store.as_retriever() if self.vector_store_manager.vector_store else None
-                return
+            self.vector_store = self.vector_store_manager.vector_store
+
+            # Initialize LLM components with CPU-only mode and explicit FP32
+            tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
             
-            # Regular initialization for non-test environment
-            self.tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL, trust_remote_code=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
+            # Force FP32 and CPU, disable all mixed precision
+            torch.set_default_dtype(torch.float32)  # Set default dtype to float32
+            model = AutoModelForCausalLM.from_pretrained(
                 LLM_MODEL,
-                torch_dtype=torch.float32,
+                torch_dtype=torch.float32,  # Force FP32
+                device_map="cpu",  # Force CPU
                 trust_remote_code=True,
-                device_map=None  # Let the model decide device placement
+                load_in_8bit=False,  # Disable quantization
+                load_in_4bit=False,  # Disable quantization
+                use_cache=True
             )
+
+            # Ensure model and all parameters are in eval mode and FP32
+            model = model.eval()
+            model = model.float()  # Convert all parameters to float32
             
-            # Create HuggingFace pipeline with updated parameters
+            # Verify all parameters are float32
+            for param in model.parameters():
+                param.data = param.data.float()
+
+            # Configure generation settings
+            generation_config = GenerationConfig(
+                do_sample=True,
+                temperature=LLM_CONFIG["temperature"],
+                top_p=LLM_CONFIG["top_p"],
+                top_k=LLM_CONFIG["top_k"],
+                repetition_penalty=LLM_CONFIG["repetition_penalty"],
+                max_new_tokens=LLM_CONFIG["max_new_tokens"],
+                pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else LLM_CONFIG["pad_token_id"]
+            )
+
+            # Create text generation pipeline with explicit FP32 settings
             pipe = pipeline(
                 "text-generation",
-                model=self.model,
-                tokenizer=self.tokenizer,
-                **LLM_CONFIG
+                model=model,
+                tokenizer=tokenizer,
+                generation_config=generation_config,
+                max_new_tokens=LLM_CONFIG["max_new_tokens"],
+                batch_size=1,  # Process one at a time for lower memory usage
+                device_map="cpu",  # Force CPU
+                torch_dtype=torch.float32,  # Force FP32
+                framework="pt",  # Explicitly set framework to PyTorch
             )
-            
-            # Create LangChain LLM
-            self.llm = HuggingFacePipeline(pipeline=pipe)
-            
-            # Initialize vector store manager
-            self.vector_store_manager = VectorStoreManager()
-            self.vector_store = self.vector_store_manager  # For backward compatibility
-            self.vector_store_manager.initialize()
-            
-            # Create QA chain with updated prompt
+
+            # Create LangChain HF pipeline
+            self.llm = HuggingFacePipeline(
+                pipeline=pipe,
+                model_kwargs={"temperature": LLM_CONFIG["temperature"]}
+            )
+
+            # Create improved prompt template with better instruction following
+            prompt = PromptTemplate(
+                template="""Given the following context from security and compliance documents, answer the question accurately and concisely. If the answer cannot be directly derived from the provided context, say "I don't have enough information to answer this question."
+
+Context: {context}
+
+Question: {question}
+
+Answer: Let me help you with that based on the provided context.""",
+                input_variables=["context", "question"]
+            )
+
+            # Initialize retriever with consistent settings
+            self.retriever = self.vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": DEFAULT_K}
+            )
+
+            # Create QA chain with optimized settings
             self.qa_chain = RetrievalQA.from_chain_type(
                 llm=self.llm,
-                chain_type="stuff",
-                retriever=self.vector_store_manager.vector_store.as_retriever(
-                    search_kwargs={"k": 3}
-                ),
+                chain_type=RAG_CHAIN_TYPE,
+                retriever=self.retriever,
+                return_source_documents=True,
                 chain_type_kwargs={
-                    "prompt": QA_PROMPT,
-                    "verbose": DEBUG
-                },
-                return_source_documents=True
-            )
-            logger.info("RAGPipeline initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Error initializing RAGPipeline: {str(e)}")
-            self.vector_store_manager = None
-            self.qa_chain = None
-            raise
-
-    def initialize(self, file_types: Optional[List[str]] = None) -> None:
-        """Initialize or update the vector store and QA chain with documents."""
-        try:
-            if not self.vector_store_manager or not self.qa_chain:
-                raise RuntimeError("Pipeline components not properly initialized")
-
-            # Load and process documents
-            documents = load_documents(file_types) if file_types else []
-            
-            if documents:
-                # Update vector store with new documents
-                self.vector_store_manager.add_documents(documents)
-                logger.info(f"Vector store updated with {len(documents)} documents")
-            else:
-                logger.warning("No documents loaded, vector store remains unchanged")
-            
-            logger.info("Vector store and QA chain ready")
-            
-        except Exception as e:
-            logger.error(f"Error initializing vector store and QA chain: {str(e)}")
-            raise RuntimeError(f"Failed to initialize the document processing system: {str(e)}")
-
-    def query(self, question: str) -> Dict[str, Any]:
-        """Process a query using the QA chain."""
-        try:
-            # In test environment, return mock response
-            if os.getenv("PYTEST_CURRENT_TEST"):
-                return {
-                    "answer": "Based on the security policy...",
-                    "sources": ["test_policy.md"],
-                    "context": "Test context"
+                    "prompt": prompt,
+                    "document_variable_name": "context"
                 }
+            )
 
-            if not self.qa_chain:
-                raise RuntimeError("QA chain not initialized")
+            logger.info("RAG Pipeline initialized successfully")
 
-            # Get context
-            relevant_docs = self.vector_store_manager.similarity_search(question, k=3)
-            context = "\n\n".join(doc.page_content for doc in relevant_docs)
-            
-            # Get answer
-            answer = self.get_answer(question, context)
-            
-            return {
-                "answer": answer,
-                "sources": [doc.metadata["source"] for doc in relevant_docs],
-                "context": context
-            }
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}")
-            return {
-                "error": str(e),
-                "sources": [],
-                "context": ""
-            }
+            logger.error(f"Failed to initialize RAG pipeline: {e}", exc_info=DEBUG)
+            raise ModelError(f"RAG Pipeline initialization failed: {str(e)}") from e
 
-    def get_stats(self) -> Dict[str, Any]:
+    def process_query(self, query: str, k: Optional[int] = None, 
+                     filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Get statistics about the RAG pipeline.
-        
-        Returns:
-            Dictionary containing pipeline statistics
-        """
-        try:
-            return {
-                "vector_store": self.vector_store_manager.get_collection_stats(),
-                "model": LLM_MODEL
-            }
-        except Exception as e:
-            logger.error(f"Error getting pipeline stats: {str(e)}")
-            return {"error": "Failed to retrieve pipeline statistics"}
-    
-    def reset(self) -> None:
-        """Reset the pipeline by clearing the vector store."""
-        try:
-            self.vector_store_manager.reset()
-            self.qa_chain = None
-            logger.info("Pipeline reset successfully")
-        except Exception as e:
-            logger.error(f"Error resetting pipeline: {str(e)}")
-            raise RuntimeError(f"Failed to reset the pipeline: {str(e)}")
-    
-    def process_query(self, query: str) -> Dict[str, Any]:
-        """
-        Process a query and return an answer with sources.
+        Process a natural language query using the RAG pipeline.
         
         Args:
             query: The user's question
+            k: Number of documents to retrieve (optional)
+            filters: Metadata filters for document retrieval (optional)
             
         Returns:
-            A dictionary with keys:
-            - answer: The generated answer
-            - sources: List of sources used
-            - context: The context used for the answer
+            Dict containing answer and source documents
         """
+        if not query or not query.strip():
+            return {"answer": "Please provide a valid question.", "sources": []}
+
         try:
-            if os.getenv("PYTEST_CURRENT_TEST"):
-                # Handle specific test cases by looking at the query content
-                if "password" in query.lower():
-                    return {
-                        "answer": "Password requirements: 12 characters minimum with a mix of uppercase, lowercase, numbers, and special characters.",
-                        "sources": ["password_policy.md", "security_standards.md"],
-                        "context": "Password policy requires minimum 12 characters"
-                    }
-                elif "gdpr" in query.lower() or "data subject" in query.lower():
-                    return {
-                        "answer": "GDPR requires data subject consent and provides rights to access, rectify, and erase personal data.",
-                        "sources": ["gdpr_compliance.md", "gdpr.md"],
-                        "context": "GDPR data subject rights include access and erasure"
-                    }
-                elif "error" in query.lower():
-                    raise Exception("Test-triggered error in process_query")
-                elif "meaning of life" in query.lower():
-                    return {
-                        "answer": "I don't have enough context to answer this question.",
-                        "sources": [],
-                        "context": ""
-                    }
-                else:
-                    return {
-                        "answer": "Based on the security policy...",
-                        "sources": ["test_doc.md"],
-                        "context": "Mock context from test documents"
-                    }
+            logger.info(f"Processing query: '{query}', k={k}, filters={filters}")
             
-            # Get relevant context
-            context = self.get_relevant_context(query)
+            # Update retriever parameters if specified
+            if k is not None:
+                self.retriever.search_kwargs["k"] = k
+            if filters:
+                self.retriever.search_kwargs["filter"] = filters
+
+            # Get relevant documents
+            documents = self.retriever.invoke(query)
+            logger.info(f"Retrieved {len(documents)} documents for query '{query}'.")
+
+            # Process query with QA chain
+            result = self.qa_chain.invoke({"query": query})
             
-            # Generate an answer
-            answer = self.get_answer(query, context)
+            # Extract answer and sources
+            answer = result.get("result", "No answer generated.")
+            source_documents = result.get("source_documents", [])
             
-            # Extract source documents
-            source_docs = []
-            if hasattr(self.vector_store_manager, 'last_search_results') and self.vector_store_manager.last_search_results:
-                source_docs = [
-                    doc.metadata.get('source', 'Unknown source')
-                    for doc in self.vector_store_manager.last_search_results
-                    if hasattr(doc, 'metadata')
-                ]
-            
+            # Format sources for response
+            sources = []
+            for doc in source_documents:
+                if hasattr(doc, 'metadata') and 'source' in doc.metadata:
+                    source = doc.metadata['source']
+                    if isinstance(source, Path):
+                        source = str(source)
+                    sources.append(source)
+
             return {
                 "answer": answer,
-                "sources": source_docs,
-                "context": context
+                "sources": list(set(sources))  # Deduplicate sources
             }
-            
+
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}")
+            logger.error(f"Error processing query '{query}': {e}", exc_info=DEBUG)
+            error_message = handle_model_error(e)
             return {
-                "answer": f"Error processing your question: {str(e)}",
-                "sources": [],
-                "context": ""
+                "answer": f"Error: {error_message}",
+                "sources": []
             }
 
     def get_relevant_context(self, query: str, k: int = 3) -> str:
-        """Get relevant context for a query."""
+        """Get relevant document chunks for a query."""
+        if not self.vector_store:
+            return ""
+            
         try:
-            # For test mode, return mock context
-            if os.getenv("PYTEST_CURRENT_TEST"):
-                if "password" in query.lower():
-                    return "Password policy requires minimum 12 characters with a mix of uppercase, lowercase, numbers, and special characters."
-                elif "gdpr" in query.lower() or "data subject" in query.lower():
-                    return "GDPR data subject rights include access and erasure. Data controllers must obtain explicit consent."
-                elif "incident" in query.lower():
-                    return "Incident Response Plan requires reporting within 24 hours."
-                elif "no context" in query.lower() or "meaning of life" in query.lower():
-                    return ""
-                else:
-                    return "Mock context from test documents"
-            
-            if not self.vector_store_manager or not self.vector_store_manager.vector_store:
-                return ""
-            
-            # Get relevant documents
-            docs = self.vector_store_manager.similarity_search(query, k=k)
-            if not docs:
-                return ""
-            
-            # Combine document contents
-            context = "\n\n".join([doc.page_content for doc in docs])
-            return context
-            
+            docs = self.vector_store.similarity_search(query, k=k)
+            return "\n\n".join(doc.page_content for doc in docs)
         except Exception as e:
-            logger.error(f"Error getting relevant context: {str(e)}")
+            logger.error(f"Error retrieving context: {e}", exc_info=DEBUG)
             return ""
 
-    def get_answer(self, question: str, context: str = "") -> str:
-        """Get answer using the QA chain."""
-        try:
-            if context is None or context.strip() == "":
-                return "I don't have enough context to answer this question."
-                
-            if os.getenv("PYTEST_CURRENT_TEST"):
-                return "Based on the security policy..."
-            
-            if self.qa_chain:
-                # Use invoke with proper input format
-                result = self.qa_chain.invoke({
-                    "query": question,
-                    "context": context[:4096]
-                })
-                
-                # Handle both dictionary and string responses
-                if isinstance(result, dict):
-                    return result.get("result", result.get("answer", "No answer found"))
-                return str(result).strip()
-            
-            # Fallback to direct LLM call
-            if self.llm:
-                prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
-                response = self.llm.invoke(prompt)
-                return str(response).strip()
-                
-            return "I don't have enough information to answer that question."
-            
-        except Exception as e:
-            logger.error(f"Error generating answer: {str(e)}")
-            return f"Error processing your question: {str(e)}"
+    def reset(self):
+        """Reset the pipeline state."""
+        self.vector_store_manager.reset()
+        self.vector_store = None
+        self._initialize_pipeline()
