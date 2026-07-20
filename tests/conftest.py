@@ -26,6 +26,8 @@ TEST_SETTINGS = {
 }
 
 class MockSentenceTransformer:
+    def __init__(self, *args, **kwargs):
+        pass
     def encode(self, texts, **kwargs):
         if isinstance(texts, str):
             return [0.1] * 384

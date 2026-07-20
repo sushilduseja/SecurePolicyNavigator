@@ -13,6 +13,15 @@ sys.modules['torch'] = mock_torch
 sys.modules['langchain_community.llms.huggingface_pipeline'] = MagicMock()
 sys.modules['langchain_community.llms.huggingface_pipeline.HuggingFacePipeline'] = MagicMock(return_value=MagicMock())
 
+# Mock RetrievalQA to avoid pydantic Runnable validation
+mock_qa_chain = MagicMock()
+mock_qa_chain.invoke.return_value = {"result": "Mock answer", "source_documents": []}
+mock_retrieval_qa = MagicMock()
+mock_retrieval_qa.from_chain_type = MagicMock(return_value=mock_qa_chain)
+sys.modules['langchain_classic'] = MagicMock()
+sys.modules['langchain_classic.chains'] = MagicMock()
+sys.modules['langchain_classic.chains.RetrievalQA'] = mock_retrieval_qa
+
 from src.rag.pipeline import RAGPipeline
 from src.utils.error_handler import ModelError
 from src.utils.document_loader import load_documents

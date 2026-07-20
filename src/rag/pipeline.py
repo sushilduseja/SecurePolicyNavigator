@@ -11,9 +11,9 @@ from transformers import (
     pipeline,
     GenerationConfig
 )
-from langchain.chains import RetrievalQA
+from langchain_classic.chains import RetrievalQA
 from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 from src.utils.config import (
     LLM_MODEL,

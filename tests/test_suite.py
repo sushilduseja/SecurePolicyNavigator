@@ -6,7 +6,7 @@ from src.utils.vector_store import VectorStoreManager
 from src.utils.document_loader import load_documents
 from src.rag.pipeline import RAGPipeline
 from src.utils.error_handler import DocumentLoadError
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 # Use absolute import for test config
 from tests.conftest import TEST_DATA_DIR

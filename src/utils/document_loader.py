@@ -19,8 +19,8 @@ except ImportError:
     logging.warning("Unstructured library not found. Markdown parsing will be basic.")
     logging.warning("Install 'unstructured' (and potentially 'unstructured[md]') for better markdown support.")
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 
 from src.utils.config import DATA_DIR, CHUNK_SIZE, CHUNK_OVERLAP
 from src.utils.error_handler import DocumentLoadError
@@ -142,6 +142,9 @@ def load_and_split_documents(data_dir: Optional[str] = None) -> List[Document]:
 
     logger.info(f"Returning {len(final_chunks)} non-empty document chunks.")
     return final_chunks
+
+# Alias for backward compatibility
+load_documents = load_and_split_documents
 
 def get_document_list(data_dir: Optional[str] = None) -> List[str]:
     """
